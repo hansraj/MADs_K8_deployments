@@ -1,0 +1,201 @@
+version: "3.1"
+
+services:
+  database:
+    image: timescale/timescaledb:latest-pg11
+    restart: always
+    ports: 
+      - 5431:5432
+    environment:
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: acqdat_prod
+    volumes: 
+      - pgdata:/var/lib/postgresql/data
+
+  redis:
+    image: redis:latest
+    container_name: redis
+    expose:
+      - "6379"
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+  
+  es01:
+    image: docker.elastic.co/elasticsearch/elasticsearch:7.10.1
+    container_name: es01
+    environment:
+      - node.name=es01
+      - cluster.name=es-docker-cluster
+      - discovery.seed_hosts=es02,es03
+      - cluster.initial_master_nodes=es01,es02,es03
+      - bootstrap.memory_lock=true
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    volumes:
+      - esdata01:/usr/share/elasticsearch/data
+    ports:
+      - 127.0.0.1:9200:9200
+
+  es02:
+    image: docker.elastic.co/elasticsearch/elasticsearch:7.10.1
+    container_name: es02
+    environment:
+      - node.name=es02
+      - cluster.name=es-docker-cluster
+      - discovery.seed_hosts=es01,es03
+      - cluster.initial_master_nodes=es01,es02,es03
+      - bootstrap.memory_lock=true
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    volumes:
+      - esdata02:/usr/share/elasticsearch/data
+
+  es03:
+    image: docker.elastic.co/elasticsearch/elasticsearch:7.10.1
+    container_name: es03
+    environment:
+      - node.name=es03
+      - cluster.name=es-docker-cluster
+      - discovery.seed_hosts=es01,es02
+      - cluster.initial_master_nodes=es01,es02,es03
+      - bootstrap.memory_lock=true
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    volumes:
+      - esdata03:/usr/share/elasticsearch/data
+
+  mqtt_broker:
+    build:
+      context: ../../
+      dockerfile: ./devops/staging/mqtt/Dockerfile
+      args:
+        DB_USER: ${DB_USER}
+        DB_PASSWORD: ${DB_PASSWORD}
+        DB_HOST: ${DB_HOST}
+        DB_PORT: ${DB_PORT}
+    restart: always
+    ports:
+      - 1882:1883
+    volumes:
+      - vernemqdata:/vernemq/data
+      - vernemqlogs:/vernemq/logs
+      - vernemqetc:/vernemq/etc
+    depends_on:
+      - database
+
+  web:
+    build: 
+      context: ../../
+      dockerfile: ./devops/staging/Dockerfile
+      args:
+        DASHBOARD_URL: ${DASHBOARD_URL}
+        MADS_URL: ${MADS_URL}
+        REDIS_PORT: ${REDIS_PORT}
+        HTTP_URL: ${HTTP_URL}
+    restart: always
+    container_name: web
+    ports:
+      - 4001:4001
+      - 4000:4000
+    environment:
+      APP_IOT_PORT: ${APP_IOT_PORT}
+      APP_API_PORT: ${APP_API_PORT}
+      APP_HOSTNAME: ${APP_HOSTNAME}
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_HOST: ${DB_HOST}
+      DB_PORT: ${DB_PORT}
+      SENDGRID_KEY: ${SENDGRID_KEY}
+      SECRET_KEY_BASE: ${SECRET_KEY_BASE}
+      GUARDIAN_API_KEY: ${GUARDIAN_API_KEY}
+      GUARDIAN_IOT_KEY: ${GUARDIAN_IOT_KEY}
+      ELASTIC_SEARCH_HOST: ${ELASTIC_SEARCH_HOST}
+      FRONTEND_URL: ${FRONTEND_URL}
+      MQTT_HOST: ${MQTT_HOST}
+      MQTT_PORT: ${MQTT_PORT}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION}
+      AWS_REGION: ${AWS_REGION}
+      AWS_S3_BUCKET: ${AWS_S3_BUCKET}
+      TWILIO_ACCOUNT_SID: ${TWILIO_ACCOUNT_SID}
+      TWILIO_AUTH_TOKEN: ${TWILIO_AUTH_TOKEN}
+      MQTT_EXPOSED_PORT: ${MQTT_EXPOSED_PORT}
+      MQTT_EXPOSED_HOSTNAME: ${MQTT_EXPOSED_HOSTNAME}
+      USER_EMAIL: ${USER_EMAIL}
+      USER_PASSWORD: ${USER_PASSWORD}
+      SENTRY_URL: ${SENTRY_URL}
+
+    depends_on:
+      - database
+      - es01
+      - mqtt_broker
+      - nodered
+      - redis
+
+  nodered:
+    image: nodered/node-red-docker:slim
+    container_name: nodered
+    ports:
+      - "1880:1880"
+    volumes:
+      - ./data/nodered:/data
+    depends_on:
+      - mosquitto
+    user: root:root
+  
+  mosquitto:
+    image: "eclipse-mosquitto"
+    container_name: mosquitto
+    ports:
+      - "1881:1881"
+      - "9001:9001"
+    volumes:
+      - ./data/mosquitto/config:/mosquitto/config
+      - ./data/mosquitto/data:/mosquitto/data
+      - ./data/mosquitto/log:/mosquitto/log
+  
+  nginx:
+    image: nginx:1.17-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    command: "/bin/sh -c 'while :; do sleep 6h & wait $${!}; nginx -s reload; done & nginx -g \"daemon off;\"'"
+    volumes:
+      - ./data/nginx/conf.d/:/etc/nginx/conf.d/
+      - ./data/certbot/conf:/etc/letsencrypt
+      - ./data/certbot/www:/var/www/certbot
+    depends_on: 
+      - web
+  
+  certbot:
+    image: certbot/certbot
+    entrypoint: "/bin/sh -c 'trap exit TERM; while :; do certbot renew; sleep 12h & wait $${!}; done;'"
+    volumes:
+      - ./data/certbot/conf:/etc/letsencrypt
+      - ./data/certbot/www:/var/www/certbot
+
+volumes: 
+  esdata01:
+    driver: local
+  esdata02:
+    driver: local
+  esdata03:
+    driver: local
+  pgdata:
+  vernemqdata:
+  vernemqlogs:
+  vernemqetc:
+  redis-data:
+
